@@ -1,0 +1,466 @@
+﻿@page "/"
+
+<style>
+    .game-container {
+        overflow: auto; /* Чтобы можно было скроллить большое поле 36x54 */
+        max-height: 80vh;
+    }
+
+    table {
+        border-collapse: collapse;
+        background-color: white;
+    }
+
+    .cell {
+        width: 10px;
+        height: 10px;
+        border: 1px solid #ccc;
+        cursor: pointer;
+    }
+
+    .empty-cell:hover {
+        background-color: #f0f0f0;
+    }
+
+    .player-cell {
+        background-color: #007bff; /* Синий для игрока */
+    }
+
+    .bot-cell {
+        background-color: #dc3545; /* Красный для бота*/
+    }
+
+    .hover-active {
+        background-color: rgba(0, 123, 255, 0.3); /* Полупрозрачный синий */
+        border: 2px solid #007bff;
+    }
+
+    .last-move {
+        outline: 2px solid yellow; /* Яркая рамка */
+        z-index: 1; /* Чтобы рамка была поверх соседей */
+    }
+</style>
+
+@code {
+    private bool squareMode = true;
+    private bool isPlayerTurn = true; // Кто сейчас ходит?
+    // Настройки из окошка перед игрой
+    private int rows = 36; // Высота поля
+    private int cols = 54; // Ширина поля
+
+    // Само поле: 0 - пусто, 1 - игрок, 2 - бот
+    private int[,] board;
+
+    private bool isGameStarted = false;
+
+    private int currentN = 0; // Ширина будущего прямоугольника
+    private int currentM = 0; // Высота будущего прямоугольника
+    private Random rnd = new Random();
+
+    //соо об ошибке
+    private string errorMessage = "";
+
+    private string botDifficulty = "easy"; // По умолчанию легкий (сложный пока не реализован)
+    private int inputRows = 36;
+    private int inputCols = 54;
+
+    private void StartGame()
+    {
+        // Присваиваем основные размеры из полей ввода
+        if (inputRows < 20)
+        {
+            rows = 20;
+        }
+        else if(inputRows > 36)
+        {
+            rows = 36;
+        }
+        else
+        {
+            rows = inputRows;
+        }
+
+        if (inputCols < 35)
+        {
+            cols = 35;
+        }
+        else if (inputCols > 54)
+        {
+            cols = 54;
+        }
+        else
+        {
+            cols = inputCols;
+        }
+        
+
+        board = new int[rows, cols];
+        board[0, 0] = 1;
+        board[rows - 1, cols - 1] = 2;
+        isGameStarted = true;
+    }
+
+
+    private void RollDice()
+    {
+        if (!isPlayerTurn) return;
+        if (currentN > 0 || currentM > 0)
+        {
+            ShowError("Вы уже бросили кубики!");
+            return;
+        }
+
+        if (squareMode)
+        {
+            currentN = rnd.Next(1, 7);
+            currentM = currentN; // В режиме квадратов стороны равны
+        }
+        else
+        {
+            currentN = rnd.Next(1, 7);
+            currentM = rnd.Next(1, 7);
+        }
+
+        // Сразу проверяем, сможем ли мы это поставить
+        var moves = GetAllValidMoves(currentN, currentM, 1);
+        var movesRotated = GetAllValidMoves(currentM, currentN, 1);
+        if (moves.Count == 0 && movesRotated.Count == 0)
+        {
+            StateHasChanged();
+            EndGame("У вас закончились возможные ходы. Бот победил!");
+        }
+    }
+
+    private void ShowError(string message)
+    {
+        errorMessage = message;
+        // StateHasChanged() здесь нужен, чтобы Blazor сразу отрисовал текст
+        StateHasChanged();
+
+        // Используем Task.Run, чтобы не блокировать основной поток
+        Task.Delay(2000).ContinueWith(_ =>
+        {
+            errorMessage = "";
+            InvokeAsync(StateHasChanged); // Безопасное обновление интерфейса из другого потока
+        });
+    }
+
+    private string GetCellClass(int r, int c)
+    {
+        string baseClass = board[r, c] switch 
+        {
+            1 => "player-cell",
+            2 => "bot-cell",
+            _ => "empty-cell"
+        };
+        if (lastMoveCells.Any(cell => cell.r == r && cell.c == c))
+            return baseClass + " last-move";
+        return baseClass;
+    }
+
+    private void OnCellClick(int r, int c)
+    {
+        if (!isPlayerTurn) return;
+        if (currentN == 0 || currentM == 0)
+        {
+            ShowError("Сначала бросьте кубики!");
+            return;
+        }
+
+        // Проверка 1: Выход за границы
+        if (r + currentN > rows || c + currentM > cols)
+        {
+            ShowError("Ошибка: фигура выходит за границы поля!");
+            return;
+        }
+
+        // Проверка 2: Наложение на другие клетки
+        for (int i = r; i < r + currentN; i++)
+        {
+            for (int j = c; j < c + currentM; j++)
+            {
+                if (board[i, j] != 0)
+                {
+                    ShowError("Ошибка: нельзя перекрывать уже закрашенные клетки!");
+                    return;
+                }
+            }
+        }
+
+        // Проверка 3: Соприкосновение сторонами
+        if (CanPlaceRect(r, c, currentN, currentM, 1))
+        {
+            errorMessage = ""; // Если всё ок, просто убираем старые ошибки сразу
+            lastMoveCells.Clear();
+            for (int i = r; i < r + currentN; i++)
+            {
+                for (int j = c; j < c + currentM; j++)
+                {
+                    board[i, j] = 1;
+                    lastMoveCells.Add((i, j));
+                }
+            }
+            currentN = 0;
+            currentM = 0;
+
+            // Запускаем ход бота в фоновом режиме
+            _ = BotMove();
+        }
+        else
+        {
+            ShowError("Ошибка: фигура должна касаться вашей территории стороной!");
+        }
+    }
+
+    private void RotateDice()
+    {
+        if (currentN > 0 && currentM > 0)
+        {
+            int temp = currentN;
+            currentN = currentM;
+            currentM = temp;
+        }
+    }
+
+    private bool CanPlaceRect(int startR, int startC, int n, int m, int playerId)
+    {
+        // 1. Проверка границ: помещается ли фигура на поле
+        if (startR + n > rows || startC + m > cols) return false;
+
+        bool hasContact = false;
+
+        // Проверяем каждую клетку будущего прямоугольника
+        for (int r = startR; r < startR + n; r++)
+        {
+            for (int c = startC; c < startC + m; c++)
+            {
+                // 2. Проверка занятости: клетка должна быть пустой[cite: 1]
+                if (board[r, c] != 0) return false;
+
+                // 3. Проверка соприкосновения сторонами с территорией игрока[cite: 1]
+                if (!hasContact)
+                {
+                    // Проверяем соседей сверху, снизу, слева и справа
+                    if ((r > 0 && board[r - 1, c] == playerId) ||           // сосед сверху
+                        (r < rows - 1 && board[r + 1, c] == playerId) ||     // сосед снизу
+                        (c > 0 && board[r, c - 1] == playerId) ||           // сосед слева
+                        (c < cols - 1 && board[r, c + 1] == playerId))      // сосед справа
+                    {
+                        hasContact = true;
+                    }
+                }
+            }
+        }
+
+        return hasContact;
+    }
+
+
+    private List<(int r, int c)> lastMoveCells = new();//массив последних клеток для подсветки
+    //корды текущей клетки под мышью
+    private int hoverR = -1;
+    private int hoverC = -1;
+
+    private bool IsHovered(int r, int c)
+    {
+        // Если кубики не брошены или мышка вне поля — подсветки нет
+        if (!isPlayerTurn || currentN == 0 || currentM == 0 || hoverR == -1) return false;
+
+        // Проверяем, попадает ли текущая клетка (r, c) в диапазон
+        // прямоугольника, который начинается в (hoverR, hoverC)
+        return r >= hoverR && r < hoverR + currentN &&
+               c >= hoverC && c < hoverC + currentM;
+    }
+
+
+    private async Task BotMove()
+    {
+        isPlayerTurn = false; // Блокируем действия игрока
+
+        int bn, bm;
+        if (squareMode)
+        {
+            bn = rnd.Next(1, 7);
+            bm = bn;
+        }
+        else
+        {
+            bn = rnd.Next(1, 7);
+            bm = rnd.Next(1, 7);
+        }
+
+        // Показываем игроку, что выпало боту (через то же сообщение об ошибке)
+        errorMessage = $"Бот выбросил {bn} x {bm} и думает...";
+        StateHasChanged();
+
+        var possibleMoves = GetAllValidMoves(bn, bm, 2);
+        var possibleRotatedMoves = GetAllValidMoves(bm, bn, 2);
+        await Task.Delay(1500); // Даем время игроку увидеть кубики бота
+
+        var allMoves = possibleMoves.Concat(possibleRotatedMoves).ToList();
+
+        if (allMoves.Count > 0)
+        {
+            var selectedMove = (botDifficulty == "easy")
+                ? allMoves[rnd.Next(allMoves.Count)]
+                : allMoves[0];
+
+            lastMoveCells.Clear(); // Очищаем старую подсветку
+            for (int i = selectedMove.r; i < selectedMove.r + selectedMove.n; i++)
+            {
+                for (int j = selectedMove.c; j < selectedMove.c + selectedMove.m; j++)
+                {
+                    board[i, j] = 2;
+                    lastMoveCells.Add((i, j)); // Запоминаем для подсветки
+                }
+            }
+
+            errorMessage = ""; // Убираем сообщение бота
+            isPlayerTurn = true; // Возвращаем ход человеку
+        }
+        else
+        {
+            EndGame("Бот не нашел ходов! Вы победили!");
+        }
+
+        StateHasChanged();
+    }
+
+
+    // Вспомогательный метод для поиска всех валидных координат
+    private List<(int r, int c, int n, int m)> GetAllValidMoves(int bn, int bm, int playerId)
+    {
+        var moves = new List<(int r, int c, int n, int m)>();
+        int[] sizesN = { bn, bm };
+        int[] sizesM = { bm, bn };
+
+        for (int rot = 0; rot < 2; rot++)
+        {
+            int tn = sizesN[rot];
+            int tm = sizesM[rot];
+
+            for (int r = 0; r <= rows - tn; r++)
+            {
+                for (int c = 0; c <= cols - tm; c++)
+                {
+                    // Используем уже готовую проверку соприкосновения
+                    if (CanPlaceRect(r, c, tn, tm, playerId))
+                    {
+                        moves.Add((r, c, tn, tm));
+                    }
+                }
+            }
+        }
+        return moves;
+    }
+
+    private bool isGameOver = false;
+    private string winnerMessage = "";
+
+    // Метод для полного сброса игры
+    private void ResetGame()
+    {
+        board = null; // Это вернет нас на самый первый экран выбора сложности
+        isGameOver = false;
+        winnerMessage = "";
+        errorMessage = "";
+        isPlayerTurn = true;
+        currentN = 0;
+        currentM = 0;
+        lastMoveCells.Clear();
+    }
+
+    private void EndGame(string message)
+    {
+        winnerMessage = message;
+        isGameOver = true;
+        StateHasChanged();
+    }
+}
+@if (board == null)
+{
+    <div style="text-align: center; margin-top: 50px;">
+        <h2>Квадратики</h2>
+        <div style="margin-bottom: 20px;">
+            <label>
+                <input type="checkbox" @bind="squareMode" /> Только квадраты (классический режим)
+            </label>
+        </div>
+        <div style="margin-bottom: 20px;">
+            <label>Размер поля(в пределах от 20х30 до 36х54):</label>
+            <input type="number" @bind="inputRows" class="form-control" style="width: 80px; display: inline-block;" />
+            x
+            <input type="number" @bind="inputCols" class="form-control" style="width: 80px; display: inline-block;" />
+        </div>
+        <div style="margin-bottom: 20px;">
+            <label>Сложность бота:</label>
+            <select @bind="botDifficulty" class="form-control" style="width: 200px; display: inline-block; margin-left: 10px;">
+                <option value="easy">Легкий (Случайный)</option>
+                @* <option value="hard">Сложный (Умный)</option> *@
+            </select>
+        </div>
+        <button class="btn btn-success btn-lg" @onclick="StartGame">Начать игру</button>
+    </div>
+}
+else
+{
+    @if (isGameOver)
+    {
+        <div style="text-align: center; margin-top: 100px; padding: 20px; background: #f8f9fa; border-radius: 15px; border: 2px solid #dee2e6;">
+            <h1 style="color: #007bff; margin-bottom: 20px;">Игра окончена!</h1>
+            <h3 style="margin-bottom: 30px;">@winnerMessage</h3>
+
+            <button class="btn btn-primary btn-lg" @onclick="ResetGame">
+                Сыграть снова
+            </button>
+        </div>
+    }
+    else
+    {
+        <div class="game-container">
+            <div style="margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 8px;">
+                <button class="btn btn-primary" @onclick="RollDice" disabled="@(!isPlayerTurn)">Бросить кубики</button>
+
+                @if (currentN > 0)
+                {
+                    <span style="margin-left: 15px; font-size: 1.2rem;">
+                        Текущая фигура: <b>@currentN</b> x <b>@currentM</b>
+                    </span>
+                }
+                else
+                {
+                    <span style="margin-left: 15px; color: gray;">Бросьте кубики, чтобы начать ход</span>
+                }
+                <button style="margin-left: 15px;" class="btn btn-secondary" @onclick="RotateDice" disabled="@(!isPlayerTurn || currentN == 0 || squareMode)">
+                    Повернуть
+                </button>
+                <button style="margin-left: 30px;" class="btn btn-primary" @onclick="ResetGame">Вернуться на главную</button>
+            </div>
+            <div style="height: 50px; margin-bottom: 10px;">
+                @if (!string.IsNullOrEmpty(errorMessage))
+                {
+                    <div style="color: #721c24; background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 10px; border-radius: 5px;">
+                        ⚠️ @errorMessage
+                    </div>
+                }
+            </div>
+            <table>
+                @for (int r = 0; r < rows; r++)
+                {
+                    <tr>
+                        @for (int c = 0; c < cols; c++)
+                        {
+                            var row = r;
+                            var col = c;
+                            <td class="cell @GetCellClass(row, col) @(IsHovered(row, col) ? "hover-active" : "")"
+                                @onclick="() => OnCellClick(row, col)"
+                                @onmouseover="() => { hoverR = row; hoverC = col; }"
+                                @onmouseout="() => { hoverR = -1; hoverC = -1; }">
+                            </td>
+                        }
+                    </tr>
+                }
+            </table>
+        </div>
+    }
+}
